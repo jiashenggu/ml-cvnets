@@ -3,6 +3,7 @@
 # Copyright (C) 2022 Apple Inc. All Rights Reserved.
 #
 
+from cvnets.layers.activation import dyshift_max
 from torch import nn
 from typing import Optional
 from utils import logger
@@ -19,6 +20,7 @@ from .activation import (
     ReLU6,
     SUPPORTED_ACT_FNS,
     Tanh,
+    DYShiftMax,
 )
 
 
@@ -55,6 +57,10 @@ def get_activation_fn(
         return Hardswish(inplace=inplace)
     elif act_type == "tanh":
         return Tanh()
+    elif act_type == 'dyshift_max':
+        return DYShiftMax(kwargs['inp'], kwargs['oup'], kwargs['reduction'], 
+            kwargs['act_max'], kwargs['act_relu'], kwargs['init_a'], kwargs['init_b'], 
+            kwargs['relu_before_pool'], kwargs['g'], kwargs['expansion'])
     else:
         logger.error(
             "Supported activation layers are: {}. Supplied argument is: {}".format(

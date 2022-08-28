@@ -22,13 +22,17 @@ def load_pretrained_model(
     """
     if not os.path.isfile(wt_loc):
         logger.error("Pretrained file is not found here: {}".format(wt_loc))
-
+    model_dict = model.state_dict()
     wts = torch.load(wt_loc, map_location="cpu")
+    wts = {k: v for k, v in wts.items() if k in model_dict}
+    model_dict.update(wts)
     try:
         if hasattr(model, "module"):
-            model.module.load_state_dict(wts)
+            # model.module.load_state_dict(wts)
+            model.module.load_state_dict(model_dict)
         else:
-            model.load_state_dict(wts)
+            # model.load_state_dict(wts)
+            model.load_state_dict(model_dict)
 
         if is_master_node:
             logger.log("Pretrained weights are loaded from {}".format(wt_loc))

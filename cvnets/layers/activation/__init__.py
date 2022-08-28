@@ -72,6 +72,7 @@ from .relu6 import ReLU6
 from .sigmoid import Sigmoid
 from .swish import Swish
 from .tanh import Tanh
+from .dyshift_max import DYShiftMax
 
 
 __all__ = [
@@ -85,4 +86,5 @@ __all__ = [
     "Sigmoid",
     "Swish",
     "Tanh",
+    "DYShiftMax",
 ]

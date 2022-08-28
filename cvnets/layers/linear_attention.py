@@ -12,8 +12,48 @@ from .conv_layer import ConvLayer
 from .dropout import Dropout
 from ..misc.profiler import module_profile
 
+from torch import nn
+import math
 
 # TODO: Add link to the paper
+
+class ChannelShuffle(nn.Module):
+    def __init__(self, groups):
+        super(ChannelShuffle, self).__init__()
+        self.groups = groups
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+
+        channels_per_group = c // self.groups
+
+        # reshape
+        x = x.view(b, self.groups, channels_per_group, h, w)
+
+        x = torch.transpose(x, 1, 2).contiguous()
+        out = x.view(b, -1, h, w)
+
+        return out
+
+
+def _make_divisible(v, divisor, min_value=None):
+    """
+    This function is taken from the original tf repo.
+    It ensures that all layers have a channel number that is divisible by 8
+    It can be seen here:
+    https://github.com/tensorflow/models/blob/master/research/slim/nets/mobilenet/mobilenet.py
+    :param v:
+    :param divisor:
+    :param min_value:
+    :return:
+    """
+    if min_value is None:
+        min_value = divisor
+    new_v = max(min_value, int(v + divisor / 2) // divisor * divisor)
+    # Make sure that round down does not go down by more than 10%.
+    if new_v < 0.9 * v:
+        new_v += divisor
+    return new_v
 
 
 class LinearSelfAttention(BaseLayer):
@@ -50,7 +90,12 @@ class LinearSelfAttention(BaseLayer):
         **kwargs
     ) -> None:
         super().__init__()
-
+        # R = 2
+        # G = int(math.sqrt(embed_dim//R))
+        # G = G if G>0 else 1
+        # G = embed_dim//(embed_dim//G)
+        G = 16
+        
         self.qkv_proj = ConvLayer(
             opts=opts,
             in_channels=embed_dim,
@@ -61,15 +106,61 @@ class LinearSelfAttention(BaseLayer):
             use_act=False,
         )
 
+        # mid_dim = _make_divisible((2*embed_dim+1)//2, G)
+        # print(mid_dim)
+        # self.qkv_proj1 = ConvLayer(
+        #     opts=opts,
+        #     in_channels=embed_dim,
+        #     out_channels=mid_dim,
+        #     bias=bias,
+        #     kernel_size=1,
+        #     use_norm=False,
+        #     use_act=False,
+        #     groups=G,
+        # )
+        self.channel_shuffle1 = ChannelShuffle(G)
+        # self.qkv_proj2 = ConvLayer(
+        #     opts=opts,
+        #     in_channels=mid_dim,
+        #     out_channels=1 + (2 * embed_dim),
+        #     bias=bias,
+        #     kernel_size=1,
+        #     use_norm=False,
+        #     use_act=False,
+        #     groups=G,
+        # )
         self.attn_dropout = Dropout(p=attn_dropout)
-        self.out_proj = ConvLayer(
+        # self.out_proj = ConvLayer(
+        #     opts=opts,
+        #     in_channels=embed_dim,
+        #     out_channels=embed_dim,
+        #     bias=bias,
+        #     kernel_size=1,
+        #     use_norm=False,
+        #     use_act=False,
+        # )
+
+        mid_dim = _make_divisible(embed_dim//2, G)
+        self.out_proj1 = ConvLayer(
             opts=opts,
             in_channels=embed_dim,
+            out_channels=mid_dim,
+            bias=bias,
+            kernel_size=1,
+            use_norm=False,
+            use_act=False,
+            groups=G,
+        )
+        
+        self.out_proj2 = ConvLayer(
+            opts=opts,
+            in_channels=mid_dim,
             out_channels=embed_dim,
             bias=bias,
             kernel_size=1,
             use_norm=False,
             use_act=False,
+            groups=G,
         )
         self.embed_dim = embed_dim
 
@@ -136,6 +227,9 @@ class LinearSelfAttention(BaseLayer):
     def _forward_self_attn(self, x: Tensor, *args, **kwargs) -> Tensor:
         # [B, C, P, N] --> [B, h + 2d, P, N]
         qkv = self.qkv_proj(x)
+        # qkv1= self.qkv_proj1(x)
+        # qkv2 = self.channel_shuffle1(qkv2)
+        # qkv3 = self.qkv_proj2(qkv2)
 
         # Project x into query, key and value
         # Query --> [B, 1, P, N]
@@ -159,7 +253,10 @@ class LinearSelfAttention(BaseLayer):
         # combine context vector with values
         # [B, d, P, N] * [B, d, P, 1] --> [B, d, P, N]
         out = F.relu(value) * context_vector.expand_as(value)
-        out = self.out_proj(out)
+        # out = self.out_proj(out)
+        out = self.out_proj1(out)
+        out = self.channel_shuffle1(out)
+        out = self.out_proj2(out)
         return out
 
     def _forward_cross_attn(
@@ -183,6 +280,17 @@ class LinearSelfAttention(BaseLayer):
             weight=self.qkv_proj.block.conv.weight[: self.embed_dim + 1, ...],
             bias=self.qkv_proj.block.conv.bias[: self.embed_dim + 1, ...],
         )
+        # qk1 = F.conv2d(
+        #     x_prev,
+        #     weight=self.qkv_proj1.block.conv.weight[: self.embed_dim + 1, ...],
+        #     bias=self.qkv_proj1.block.conv.bias[: self.embed_dim + 1, ...],
+        # )
+        # qk2 = self.channel_shuffle1(qk2)
+        # qk3 = F.conv2d(
+        #     x_prev,
+        #     weight=self.qkv_proj2.block.conv.weight,
+        #     bias=self.qkv_proj2.block.conv.bias,
+        # )
         # [B, 1 + d, P, M] --> [B, 1, P, M], [B, d, P, M]
         query, key = torch.split(qk, split_size_or_sections=[1, self.embed_dim], dim=1)
         # [B, C, P, N] --> [B, d, P, N]
@@ -191,7 +299,17 @@ class LinearSelfAttention(BaseLayer):
             weight=self.qkv_proj.block.conv.weight[self.embed_dim + 1 :, ...],
             bias=self.qkv_proj.block.conv.bias[self.embed_dim + 1 :, ...],
         )
-
+        # value1 = F.conv2d(
+        #     x,
+        #     weight=self.qkv_proj.block.conv.weight[self.embed_dim + 1 :, ...],
+        #     bias=self.qkv_proj.block.conv.bias[self.embed_dim + 1 :, ...],
+        # )
+        # value2 = self.channel_shuffle1(value2)
+        # value3 = F.conv2d(
+        #     x,
+        #     weight=self.qkv_proj.block.conv.weight,
+        #     bias=self.qkv_proj.block.conv.bias,
+        # )
         # apply softmax along M dimension
         context_scores = F.softmax(query, dim=-1)
         context_scores = self.attn_dropout(context_scores)
@@ -205,7 +323,10 @@ class LinearSelfAttention(BaseLayer):
         # combine context vector with values
         # [B, d, P, N] * [B, d, P, 1] --> [B, d, P, N]
         out = F.relu(value) * context_vector.expand_as(value)
-        out = self.out_proj(out)
+        # out = self.out_proj(out)
+        out = self.out_proj1(out)
+        out = self.channel_shuffle1(out)
+        out = self.out_proj2(out)
         return out
 
     def forward(
